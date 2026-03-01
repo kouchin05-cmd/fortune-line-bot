@@ -1,6 +1,6 @@
 import os
 import json
-from flask import Flask, request, abort
+from flask import Flask, request
 import requests
 
 app = Flask(__name__)
@@ -16,15 +16,14 @@ def callback():
     body = request.json
 
     for event in body.get("events", []):
-        if event["type"] == "message":
+        if event["type"] == "message" and event["message"]["type"] == "text":
             reply_token = event["replyToken"]
             user_message = event["message"]["text"]
-
-            reply(reply_token, f"あなたはこう言いました🌙\n{user_message}")
+            send_reply(reply_token, f"あなたはこう言いました🌙\n{user_message}")
 
     return "OK", 200
 
-def reply(reply_token, message):
+def send_reply(reply_token, message):
     url = "https://api.line.me/v2/bot/message/reply"
     headers = {
         "Content-Type": "application/json",
@@ -33,10 +32,7 @@ def reply(reply_token, message):
     data = {
         "replyToken": reply_token,
         "messages": [
-            {
-                "type": "text",
-                "text": message
-            }
+            {"type": "text", "text": message}
         ]
     }
     requests.post(url, headers=headers, data=json.dumps(data))
