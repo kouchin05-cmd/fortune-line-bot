@@ -11,15 +11,16 @@ app = Flask(__name__)
 CHANNEL_ACCESS_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
+# ジャンル別アフィリエイトリンク（未設定なら空でOK）
 AFFILIATE_LINKS = {
-    "恋愛": os.environ.get("AFFILIATE_RENAI", ""),
-    "復縁": os.environ.get("AFFILIATE_FUKUEN", ""),
-    "不倫": os.environ.get("AFFILIATE_FURIN", ""),
-    "結婚": os.environ.get("AFFILIATE_KEKKON", ""),
-    "金運": os.environ.get("AFFILIATE_KINUN", ""),
+    "恋愛": os.environ.get("AFFILIATE_RENAI", "").strip(),
+    "復縁": os.environ.get("AFFILIATE_FUKUEN", "").strip(),
+    "不倫": os.environ.get("AFFILIATE_FURIN", "").strip(),
+    "結婚": os.environ.get("AFFILIATE_KEKKON", "").strip(),
+    "金運": os.environ.get("AFFILIATE_KINUN", "").strip(),
 }
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 DB_PATH = "fortune.db"
 
@@ -44,18 +45,21 @@ INTENSITIES = {
 # -----------------
 # 生年月日ゆる判定
 # -----------------
-def normalize_birthday(text):
+def normalize_birthday(text: str):
     t = text.strip()
+
     patterns = [
-        r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$",
-        r"^(\d{4})(\d{2})(\d{2})$",
-        r"^(\d{4})年(\d{1,2})月(\d{1,2})日$",
+        r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$",   # 1995/05/01 or 1995-5-1
+        r"^(\d{4})(\d{2})(\d{2})$",              # 19950501
+        r"^(\d{4})年(\d{1,2})月(\d{1,2})日$",     # 1995年5月1日
     ]
+
     for p in patterns:
         m = re.match(p, t)
         if m:
             y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
             return f"{y}/{mo:02d}/{d:02d}"
+
     return None
 
 # -----------------
@@ -102,7 +106,7 @@ def upsert_user(uid, concern=None, situation=None, intensity=None, stage=None):
 init_db()
 
 # -----------------
-# LINE返信
+# LINE送信
 # -----------------
 def headers():
     return {
@@ -114,11 +118,17 @@ def reply_text(reply_token, text):
     requests.post(
         "https://api.line.me/v2/bot/message/reply",
         headers=headers(),
-        data=json.dumps({"replyToken": reply_token, "messages": [{"type": "text", "text": text}]})
+        data=json.dumps({
+            "replyToken": reply_token,
+            "messages": [{"type": "text", "text": text}]
+        })
     )
 
 def reply_quick(reply_token, text, options):
-    items = [{"type": "action", "action": {"type": "message", "label": o, "text": o}} for o in options]
+    items = [
+        {"type": "action", "action": {"type": "message", "label": o, "text": o}}
+        for o in options
+    ]
     requests.post(
         "https://api.line.me/v2/bot/message/reply",
         headers=headers(),
@@ -133,9 +143,12 @@ def reply_quick(reply_token, text, options):
     )
 
 # -----------------
-# 鑑定生成
+# 鑑定書生成（429統一メッセージ対応）
 # -----------------
 def generate_report(birthday, concern, situation, intensity):
+    if not OPENAI_API_KEY or not client:
+        return "今ちょっと混み合ってるみたい💦 30秒ほど待ってからもう一度送ってね🌙"
+
     system = """
 あなたはプロの占い師です。
 必ず以下の形式で簡易鑑定書を作成してください。
@@ -145,6 +158,8 @@ def generate_report(birthday, concern, situation, intensity):
 【行動アドバイス】
 【NG行動】
 【開運アクション】
+
+優しく具体的に、希望を持たせる内容で。
 """
 
     user = f"""
@@ -154,14 +169,22 @@ def generate_report(birthday, concern, situation, intensity):
 本気度：{intensity}
 """
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user}],
-        temperature=0.8,
-    )
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            temperature=0.8,
+        )
 
-    return response.choices[0].message.content.strip()
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        print("OPENAI ERROR:", repr(e))
+        # 429でもその他でも同じメッセージ
+        return "今ちょっと混み合ってるみたい💦 30秒ほど待ってからもう一度送ってね🌙"
 
 # -----------------
 # Webhook
@@ -180,6 +203,7 @@ def callback():
 
         row = get_user(uid)
 
+        # 初回
         if not row:
             upsert_user(uid, stage="choose_concern")
             reply_quick(reply_token, "どの悩みを占う？🌙", CONCERNS)
@@ -187,6 +211,7 @@ def callback():
 
         _, concern, situation, intensity, stage = row
 
+        # ジャンル選択
         if stage == "choose_concern":
             if text in CONCERNS:
                 upsert_user(uid, concern=text, stage="choose_situation")
@@ -195,26 +220,33 @@ def callback():
                 reply_quick(reply_token, "どの悩みを占う？🌙", CONCERNS)
             continue
 
+        # 状況選択
         if stage == "choose_situation":
             if text in SITUATIONS.get(concern, []):
                 upsert_user(uid, situation=text, stage="choose_intensity")
                 reply_quick(reply_token, "本気度は？", INTENSITIES[concern])
             continue
 
+        # 本気度選択
         if stage == "choose_intensity":
             if text in INTENSITIES.get(concern, []):
                 upsert_user(uid, intensity=text, stage="wait_birthday")
-                reply_text(reply_token, "生年月日を送ってね🌙（例：1995/05/01）")
+                reply_text(reply_token, "生年月日を送ってね🌙（例：1995/05/01、1995-05-01、19950501、1995年5月1日）")
             continue
 
+        # 生年月日入力
         if stage == "wait_birthday":
             bday = normalize_birthday(text)
             if bday:
                 report = generate_report(bday, concern, situation, intensity)
+
                 link = AFFILIATE_LINKS.get(concern, "")
                 if link:
                     report += f"\n\n――――\n特別鑑定はこちら👇\n{link}"
+
                 reply_text(reply_token, report)
+
+                # リセット
                 upsert_user(uid, stage="choose_concern")
                 reply_quick(reply_token, "他の悩みも占う？🌙", CONCERNS)
             else:
