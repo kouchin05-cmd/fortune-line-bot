@@ -11,7 +11,6 @@ app = Flask(__name__)
 CHANNEL_ACCESS_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# ジャンル別アフィリ
 AFFILIATE_LINKS = {
     "恋愛": os.environ.get("AFFILIATE_RENAI", ""),
     "復縁": os.environ.get("AFFILIATE_FUKUEN", ""),
@@ -43,23 +42,20 @@ INTENSITIES = {
 }
 
 # -----------------
-# 生年月日ゆるく判定
+# 生年月日ゆる判定
 # -----------------
 def normalize_birthday(text):
     t = text.strip()
-
     patterns = [
         r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$",
         r"^(\d{4})(\d{2})(\d{2})$",
         r"^(\d{4})年(\d{1,2})月(\d{1,2})日$",
     ]
-
     for p in patterns:
         m = re.match(p, t)
         if m:
             y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
             return f"{y}/{mo:02d}/{d:02d}"
-
     return None
 
 # -----------------
@@ -108,31 +104,47 @@ init_db()
 # -----------------
 # LINE返信
 # -----------------
-def reply_text(reply_token, text):
-    url = "https://api.line.me/v2/bot/message/reply"
-    headers = {
+def headers():
+    return {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}",
     }
-    payload = {"replyToken": reply_token, "messages": [{"type": "text", "text": text}]}
-    requests.post(url, headers=headers, data=json.dumps(payload))
+
+def reply_text(reply_token, text):
+    requests.post(
+        "https://api.line.me/v2/bot/message/reply",
+        headers=headers(),
+        data=json.dumps({"replyToken": reply_token, "messages": [{"type": "text", "text": text}]})
+    )
+
+def reply_quick(reply_token, text, options):
+    items = [{"type": "action", "action": {"type": "message", "label": o, "text": o}} for o in options]
+    requests.post(
+        "https://api.line.me/v2/bot/message/reply",
+        headers=headers(),
+        data=json.dumps({
+            "replyToken": reply_token,
+            "messages": [{
+                "type": "text",
+                "text": text,
+                "quickReply": {"items": items}
+            }]
+        })
+    )
 
 # -----------------
-# 鑑定書生成
+# 鑑定生成
 # -----------------
-def generate_fortune(birthday, concern, situation, intensity):
-
+def generate_report(birthday, concern, situation, intensity):
     system = """
 あなたはプロの占い師です。
-必ず以下の形式で「簡易鑑定書」を作成してください。
+必ず以下の形式で簡易鑑定書を作成してください。
 
 【総合】
 【今の流れ】
 【行動アドバイス】
 【NG行動】
 【開運アクション】
-
-文章は優しく、具体的で、希望を持たせる内容にしてください。
 """
 
     user = f"""
@@ -144,37 +156,12 @@ def generate_fortune(birthday, concern, situation, intensity):
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user}
-        ],
+        messages=[{"role": "system", "content": system},
+                  {"role": "user", "content": user}],
         temperature=0.8,
     )
 
     return response.choices[0].message.content.strip()
-
-# -----------------
-# アフィリ導線
-# -----------------
-def add_affiliate_hook(fortune_text, concern):
-    link = AFFILIATE_LINKS.get(concern, "")
-    if not link:
-        return fortune_text
-
-    hook = f"""
-
-――――――――――
-【特別なご案内】
-
-本気でこの流れを変えたいなら、
-こちらの特別鑑定も確認してみてください🌙
-
-{link}
-
-※必要な人だけで大丈夫です。
-"""
-
-    return fortune_text + hook
 
 # -----------------
 # Webhook
@@ -195,20 +182,43 @@ def callback():
 
         if not row:
             upsert_user(uid, stage="choose_concern")
-            reply_text(reply_token, "どの悩みを占う？\n恋愛 / 復縁 / 不倫 / 結婚 / 金運")
+            reply_quick(reply_token, "どの悩みを占う？🌙", CONCERNS)
             continue
 
         _, concern, situation, intensity, stage = row
 
+        if stage == "choose_concern":
+            if text in CONCERNS:
+                upsert_user(uid, concern=text, stage="choose_situation")
+                reply_quick(reply_token, "今の状況は？", SITUATIONS[text])
+            else:
+                reply_quick(reply_token, "どの悩みを占う？🌙", CONCERNS)
+            continue
+
+        if stage == "choose_situation":
+            if text in SITUATIONS.get(concern, []):
+                upsert_user(uid, situation=text, stage="choose_intensity")
+                reply_quick(reply_token, "本気度は？", INTENSITIES[concern])
+            continue
+
+        if stage == "choose_intensity":
+            if text in INTENSITIES.get(concern, []):
+                upsert_user(uid, intensity=text, stage="wait_birthday")
+                reply_text(reply_token, "生年月日を送ってね🌙（例：1995/05/01）")
+            continue
+
         if stage == "wait_birthday":
             bday = normalize_birthday(text)
             if bday:
-                fortune = generate_fortune(bday, concern, situation, intensity)
-                fortune = add_affiliate_hook(fortune, concern)
-                reply_text(reply_token, fortune)
+                report = generate_report(bday, concern, situation, intensity)
+                link = AFFILIATE_LINKS.get(concern, "")
+                if link:
+                    report += f"\n\n――――\n特別鑑定はこちら👇\n{link}"
+                reply_text(reply_token, report)
                 upsert_user(uid, stage="choose_concern")
+                reply_quick(reply_token, "他の悩みも占う？🌙", CONCERNS)
             else:
-                reply_text(reply_token, "生年月日を 1995/05/01 のように送ってね🌙")
+                reply_text(reply_token, "生年月日を正しい形式で送ってね🌙")
             continue
 
     return "OK", 200
