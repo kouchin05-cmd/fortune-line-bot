@@ -2,3 +2,4 @@ flask
 requests
 gunicorn
 openai>=1.40.0
+stripe
