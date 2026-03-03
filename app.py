@@ -17,13 +17,18 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # ====== note決済（合言葉） ======
 NOTE_PAID_URL = os.environ.get("NOTE_PAID_URL", "").strip()          # note有料記事URL
-NOTE_ACCESS_CODE = os.environ.get("NOTE_ACCESS_CODE", "").strip()    # 購入コード（有料記事に記載する合言葉）
+NOTE_ACCESS_CODE = os.environ.get("NOTE_ACCESS_CODE", "").strip()    # 購入コード（有料記事に記載）
 PAID_TTL_DAYS = int(os.environ.get("PAID_TTL_DAYS", "30"))            # 有料権限の有効日数
 PAID_TTL_SECONDS = PAID_TTL_DAYS * 24 * 60 * 60
 
 PAID_PRICE_TEXT = "980円"
 PAID_LABEL = f"💎 特別鑑定（{PAID_PRICE_TEXT}）"
-BUSY_MSG = "今ちょっと混み合ってるみたい💦 30秒ほど待ってからもう一度送ってね🌙"
+
+BUSY_MSG = (
+    "いま、少し混み合っているみたい。\n"
+    "30秒ほど置いて、もう一度。\n"
+    "……月灯りの下で。"
+)
 
 DB_PATH = "fortune.db"
 
@@ -82,7 +87,7 @@ def init_db():
     )
     """)
 
-    # 旧Stripe版との互換を保ちつつ、note用に拡張
+    # note用：paid_until / note_code_used
     c.execute("""
     CREATE TABLE IF NOT EXISTS payments (
         line_user_id TEXT PRIMARY KEY,
@@ -92,8 +97,7 @@ def init_db():
     )
     """)
 
-    # 既存DBがStripe版で payments(line_user_id, paid, stripe_session_id) 等の場合があるので、
-    # カラムが無ければ追加する（落ちないように）
+    # 既存DBとの互換（カラム不足があっても落ちないように）
     existing_cols = set()
     c.execute("PRAGMA table_info(payments)")
     for row in c.fetchall():
@@ -110,8 +114,6 @@ def init_db():
             c.execute("ALTER TABLE payments ADD COLUMN note_code_used TEXT DEFAULT NULL")
         except Exception:
             pass
-
-    # stripe_session_idが残っていても無視（消さなくてOK）
 
     conn.commit()
     conn.close()
@@ -206,6 +208,21 @@ def reply_quick_uri(reply_token, text, label, uri):
     )
 
 # -----------------
+# ツクヨミ：口調ルール（OpenAI指示）
+# -----------------
+TSUKUYOMI_STYLE_SYSTEM = (
+    "次のルールで日本語出力。\n"
+    "・一人称は使わない（『私は』などを避ける）\n"
+    "・断言しすぎない。可能性の幅を残す\n"
+    "・怖がらせない。静かで短文。\n"
+    "・余白を残す\n"
+    "・神秘性は保つが、嘘は書かない\n"
+    "・『占い師』と名乗らない\n"
+    "・世界観は『書院』『月灯り』『兆し』で統一\n"
+    "・医療/法律/投資の助言はしない。結果や効果は保証しない\n"
+)
+
+# -----------------
 # ツクヨミ：無料（簡易）鑑定
 # -----------------
 def generate_free_report(birthday, concern, situation, intensity) -> str:
@@ -213,21 +230,21 @@ def generate_free_report(birthday, concern, situation, intensity) -> str:
         return BUSY_MSG
 
     system = (
-        "あなたは黒猫占い師『ツクヨミ』です。"
-        "月と書院の静けさを感じる、やさしく神秘的な口調。"
-        "これは【無料簡易鑑定】です。深層心理や転機の“具体日付”、確定表現は避ける。"
-        "出力形式は必ず次の3つのみ："
-        "【月の兆し】"
-        "【今の流れ（表層）】"
-        "【小さな助言】"
-        "全体300〜520文字。"
+        TSUKUYOMI_STYLE_SYSTEM +
+        "\n【無料簡易】\n"
+        "・深層心理の決め打ち、具体的な日付の断定は避ける\n"
+        "・出力は必ずこの3つだけ。\n"
+        "【月の兆し】\n"
+        "【今の流れ（表層）】\n"
+        "【小さな助言】\n"
+        "・全体300〜520文字\n"
     )
     user = (
         f"生年月日：{birthday}\n"
         f"ジャンル：{concern}\n"
         f"状況：{situation}\n"
         f"本気度：{intensity}\n"
-        "上記に合わせて無料簡易鑑定を作ってください。"
+        "上記に合わせて、無料簡易の文を作成。"
     )
 
     try:
@@ -249,25 +266,25 @@ def generate_paid_report(birthday, concern, situation, intensity) -> str:
         return BUSY_MSG
 
     system = (
-        "あなたは黒猫占い師『ツクヨミ』です。"
-        "書院の月灯りの中で、静かに深層を読み解きます。"
-        "これは【特別鑑定】です。無料より深く具体的に。"
-        "出力形式は必ずこの順番："
-        "【核心（本当の状況）】"
-        "【相手の深層心理】"
-        "【30日以内の転機】"
-        "【取るべき行動（3つ）】"
-        "【避けるべき行動（2つ）】"
-        "【月読の最終言葉】"
-        "700〜1200文字。神秘的だが現実的で、実行できる内容にする。"
-        "断定しすぎないが、曖昧に逃げない。"
+        TSUKUYOMI_STYLE_SYSTEM +
+        "\n【特別】\n"
+        "・無料より深く、具体性は上げる。ただし言い切りすぎない\n"
+        "・実行できる提案に寄せる\n"
+        "・出力は必ずこの順。\n"
+        "【核心（いま起きていること）】\n"
+        "【相手の深層（推測の範囲）】\n"
+        "【30日以内の転機（幅を残す）】\n"
+        "【取るべき行動（3つ）】\n"
+        "【避けるべき行動（2つ）】\n"
+        "【月読の言葉】\n"
+        "・700〜1200文字\n"
     )
     user = (
         f"生年月日：{birthday}\n"
         f"ジャンル：{concern}\n"
         f"状況：{situation}\n"
         f"本気度：{intensity}\n"
-        "上記に合わせて特別鑑定を作ってください。"
+        "上記に合わせて、特別鑑定の文を作成。"
     )
 
     try:
@@ -282,28 +299,41 @@ def generate_paid_report(birthday, concern, situation, intensity) -> str:
         return BUSY_MSG
 
 # -----------------
-# note案内
+# note案内（ツクヨミ文体）
 # -----------------
 def note_guide_text() -> str:
     if not NOTE_PAID_URL:
-        return "（設定エラー）NOTE_PAID_URL が未設定です。運営に連絡してね🌙"
+        return (
+            "いま、扉の鍵が見つからないみたい。\n"
+            "少し時間を置いて。\n"
+            "……また、書院で。"
+        )
     return (
-        f"💎 特別鑑定（{PAID_PRICE_TEXT}）は note で販売しています。\n"
-        f"▼購入はこちら\n{NOTE_PAID_URL}\n\n"
-        "購入後に表示される『購入コード』を、LINEでこう送ってね：\n"
-        "購入コード XXXXX\n\n"
-        "確認できたら特別鑑定が解放されます🌙"
+        f"💎 特別鑑定（{PAID_PRICE_TEXT}）\n"
+        "扉は note に置いてある。\n"
+        f"{NOTE_PAID_URL}\n\n"
+        "購入後に表示される「購入コード」を送って。\n"
+        "形式：購入コード XXXXX\n\n"
+        "確認できたら、奥へ進める。"
     )
 
-def try_accept_code(text: str) -> str | None:
+def try_accept_code(text: str):
     """
-    '購入コード XXXX' / 'コード XXXX' の形式を許容して、コードを返す
+    '購入コード XXXX' / 'コード XXXX' を許容してコードを返す
     """
     t = text.strip()
     m = re.match(r"^(購入コード|コード)\s*[:：]?\s*(.+)$", t)
     if not m:
         return None
     return m.group(2).strip()
+
+def paid_confirm_text() -> str:
+    return (
+        "……確認できた。\n"
+        "扉が開く。\n\n"
+        f"有効期限：{PAID_TTL_DAYS}日\n"
+        "次に「特別鑑定」と送って。"
+    )
 
 # -----------------
 # Routes
@@ -331,7 +361,7 @@ def callback():
         row = get_user(uid)
         if not row:
             upsert_user(uid, stage="choose_concern")
-            reply_quick(reply_token, "どの悩みを占う？🌙（黒猫占い師ツクヨミ）", CONCERNS)
+            reply_quick(reply_token, "どの悩みを視る？\n……静かに。", CONCERNS)
             continue
 
         _, concern, situation, intensity, stage = row
@@ -339,50 +369,21 @@ def callback():
         # いつでもリセット
         if text.lower() in ["reset", "リセット"]:
             upsert_user(uid, concern=None, situation=None, intensity=None, stage="choose_concern")
-            reply_quick(reply_token, "最初から視るね🌙 どの悩み？", CONCERNS)
+            reply_quick(reply_token, "最初から。\nどの悩み？", CONCERNS)
             continue
 
-        # まず「購入コード」をいつでも受け付ける（ステージ関係なし）
+        # 購入コードはいつでも受け付ける（ステージ関係なし）
         code = try_accept_code(text)
         if code is not None:
             if not NOTE_ACCESS_CODE:
-                reply_text(reply_token, "（設定エラー）NOTE_ACCESS_CODE が未設定です。運営に連絡してね🌙")
+                reply_text(reply_token, "いま、合言葉が設定されていないみたい。\n運用側で確認を。")
                 continue
 
             if code == NOTE_ACCESS_CODE:
                 grant_paid(uid, code_used=code)
-                reply_text(
-                    reply_token,
-                    "【確認完了】購入コードを受領しました🌙\n"
-                    "LINEに戻って『特別鑑定』と送ってください。\n"
-                    f"（有効期限：{PAID_TTL_DAYS}日）"
-                )
+                reply_text(reply_token, paid_confirm_text())
             else:
-                reply_text(
-                    reply_token,
-                    "購入コードが一致しませんでした💦\n"
-                    "note購入後に表示されるコードを、もう一度そのまま送ってね。\n\n" + note_guide_text()
-                )
-            continue
-
-        # === 有料導線：コマンド ===
-        if text == "特別鑑定":
-            if is_paid(uid):
-                # 選択が揃ってなければ取り直し
-                if not (concern and situation and intensity):
-                    upsert_user(uid, stage="choose_concern")
-                    reply_quick(reply_token, "まずは悩みを選んでね🌙", CONCERNS)
-                else:
-                    upsert_user(uid, stage="wait_birthday_paid")
-                    reply_text(reply_token, "……書院の奥へ。生年月日を送って🌙（例：1995/05/01）")
-            else:
-                # noteへ案内
-                reply_quick_uri(
-                    reply_token,
-                    note_guide_text(),
-                    PAID_LABEL,
-                    NOTE_PAID_URL or "https://note.com"
-                )
+                reply_text(reply_token, "その購入コードは見つからなかった。\nもう一度、確認を。\n\n" + note_guide_text())
             continue
 
         # note案内（コマンド）
@@ -390,86 +391,96 @@ def callback():
             reply_text(reply_token, note_guide_text())
             continue
 
+        # === 有料導線：コマンド ===
+        if text == "特別鑑定":
+            if is_paid(uid):
+                if not (concern and situation and intensity):
+                    upsert_user(uid, stage="choose_concern")
+                    reply_quick(reply_token, "まず、悩みを選んで。\n……月灯りの下で。", CONCERNS)
+                else:
+                    upsert_user(uid, stage="wait_birthday_paid")
+                    reply_text(reply_token, "……奥へ。\n生年月日を送って。\n（例：1995/05/01）")
+            else:
+                reply_quick_uri(reply_token, note_guide_text(), PAID_LABEL, NOTE_PAID_URL or "https://note.com")
+            continue
+
         # === 無料フロー（QuickReply） ===
         if stage == "choose_concern":
             if text in CONCERNS:
                 upsert_user(uid, concern=text, situation=None, intensity=None, stage="choose_situation")
-                reply_quick(reply_token, f"了解🌙（{text}）いまの状況は？", SITUATIONS[text])
+                reply_quick(reply_token, f"{text}。\nいまの状況は？", SITUATIONS[text])
             else:
-                reply_quick(reply_token, "どの悩みを占う？🌙", CONCERNS)
+                reply_quick(reply_token, "どの悩みを視る？", CONCERNS)
             continue
 
         if stage == "choose_situation":
             valid = SITUATIONS.get(concern or "", [])
             if text in valid:
                 upsert_user(uid, situation=text, stage="choose_intensity")
-                reply_quick(reply_token, "本気度はどれに近い？🌙", INTENSITIES[concern])
+                reply_quick(reply_token, "本気度はどれに近い？", INTENSITIES[concern])
             else:
-                reply_quick(reply_token, "その中から選んでね🌙", valid)
+                reply_quick(reply_token, "その中から選んで。", valid)
             continue
 
         if stage == "choose_intensity":
             valid = INTENSITIES.get(concern or "", [])
             if text in valid:
                 upsert_user(uid, intensity=text, stage="wait_birthday_free")
-                reply_text(reply_token, "生年月日を送って🌙（例：1995/05/01、1995-05-01、19950501、1995年5月1日）")
+                reply_text(reply_token, "生年月日を送って。\n（例：1995/05/01、1995-05-01、19950501、1995年5月1日）")
             else:
-                reply_quick(reply_token, "その中から選んでね🌙", valid)
+                reply_quick(reply_token, "その中から選んで。", valid)
             continue
 
         # === 無料：生年月日入力 → 無料鑑定 → note導線 ===
         if stage == "wait_birthday_free":
             bday = normalize_birthday(text)
             if not bday:
-                reply_text(reply_token, "生年月日をこの形で送ってね🌙（例：1995/05/01）")
+                reply_text(reply_token, "この形で。\n（例：1995/05/01）")
                 continue
 
             report = generate_free_report(bday, concern, situation, intensity)
-
             if report == BUSY_MSG:
                 reply_text(reply_token, report)
                 continue
 
             upsell_text = (
                 "\n\n――――――――――\n"
-                "……ここから先は、まだ視ていない。\n"
-                "私は“表層”しか語っていない。\n\n"
-                "もし本気で流れを変えたいなら、\n"
-                "・相手の深層心理\n"
-                "・30日以内の転機\n"
-                "・あなた専用の行動設計（3つ）\n"
-                "まで読み解く。\n\n"
-                f"▼ 黒猫占い師ツクヨミの特別鑑定（{PAID_PRICE_TEXT}）\n"
-                "note購入後に表示される『購入コード』をLINEに送って🌙\n"
+                "……ここから先は、まだ深い。\n"
+                "表層だけを撫でた。\n\n"
+                "特別鑑定では、次を丁寧に。\n"
+                "・相手の深層（推測の範囲）\n"
+                "・30日以内の転機（幅を残す）\n"
+                "・行動の組み立て（3つ）\n\n"
+                f"特別鑑定（{PAID_PRICE_TEXT}）\n"
+                "note購入後の「購入コード」を送って。"
             )
 
-            reply_text(reply_token, report + upsell_text + "\n" + note_guide_text())
+            reply_text(reply_token, report + upsell_text + "\n\n" + note_guide_text())
 
-            # 次の相談へ
             upsert_user(uid, stage="choose_concern")
-            reply_quick(reply_token, "他の悩みも視る？🌙", CONCERNS)
+            reply_quick(reply_token, "他の悩みも視る？", CONCERNS)
             continue
 
         # === 有料：生年月日入力 → 特別鑑定 ===
         if stage == "wait_birthday_paid":
             bday = normalize_birthday(text)
             if not bday:
-                reply_text(reply_token, "生年月日をこの形で送ってね🌙（例：1995/05/01）")
+                reply_text(reply_token, "この形で。\n（例：1995/05/01）")
                 continue
 
             if not is_paid(uid):
-                reply_text(reply_token, "特別鑑定は購入後に解放されます🌙\n\n" + note_guide_text())
+                reply_text(reply_token, "まだ扉が閉じているみたい。\n\n" + note_guide_text())
                 continue
 
             paid_report = generate_paid_report(bday, concern, situation, intensity)
-            reply_text(reply_token, "💎 ツクヨミ特別鑑定\n\n" + paid_report)
+            reply_text(reply_token, "💎 特別鑑定\n\n" + paid_report)
 
             upsert_user(uid, stage="choose_concern")
-            reply_quick(reply_token, "また視る？🌙", CONCERNS)
+            reply_quick(reply_token, "また視る？", CONCERNS)
             continue
 
         # 想定外：初期化
         upsert_user(uid, stage="choose_concern")
-        reply_quick(reply_token, "最初から視るね🌙 どの悩み？", CONCERNS)
+        reply_quick(reply_token, "最初から。\nどの悩み？", CONCERNS)
 
     return "OK", 200
